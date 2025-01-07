@@ -11,12 +11,15 @@ dependencies:
   flutter:
     sdk: flutter
 
+  http: ^1.2.2
   gql_http_link: ^1.1.0
   gql_websocket_link: ^2.0.0
   web_socket_channel: ^2.4.0
   ferry: ^0.16.0
 
   nsd: ^3.0.0
+
+  crypto: ^3.0.6
 
   built_value: ^8.9.0
   built_collection: ^5.1.1

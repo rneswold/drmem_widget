@@ -10,13 +10,16 @@ library drmem_widget;
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:http/io_client.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:gql_websocket_link/gql_websocket_link.dart';
 import 'package:gql_http_link/gql_http_link.dart';
 import 'package:ferry/ferry.dart';
 import 'package:nsd/nsd.dart';
+import 'package:crypto/crypto.dart';
 import 'package:built_collection/built_collection.dart';
 import 'schema/__generated__/set_device.data.gql.dart';
 import 'schema/__generated__/set_device.req.gql.dart';
@@ -136,6 +139,26 @@ extension on Service {
           HostInfo(_stripTrailingPeriod(h), p);
       final boottime = _propToString("bootTime");
 
+      (String, String)? sigs;
+
+      // This was added for backwards compatibility. DrMem v0.5.0, and earlier,
+      // only reported the SHA-1 digest of the certificate. Later versions
+      // report two digests to make it much more difficult to generate a
+      // fake certificate.
+
+      final tmp = _propToString("signature");
+
+      if (tmp == null) {
+        final s1 = _propToString("sig_md5");
+        final s2 = _propToString("sig_sha");
+
+        if (s1 != null && s2 != null) {
+          sigs = (s1, s2);
+        }
+      } else {
+        sigs = ("", tmp);
+      }
+
       return NodeInfo(
         name: n,
         addr: addr,
@@ -146,7 +169,7 @@ extension on Service {
                 ? DateTime.tryParse(boottime) ?? DateTime.now()
                 : DateTime.now())
             : null,
-        signature: _propToString("signature"),
+        signatures: sigs,
         queries: _propToString("queries") ?? "/drmem/q",
         mutations: _propToString("mutations") ?? "/drmem/q",
         subscriptions: _propToString("subscriptions") ?? "/drmem/s",
@@ -363,11 +386,29 @@ class _DrMemState extends State<DrMem> {
         )
       );
 
+  static String _intToHex(int v) => "0${v.toRadixString(16)}".padLeft(2, '0');
+
   // Creates two `Client` connections that will connect to the specified node.
   // If an encrypted channel is requested, the client's ID is passed along.
 
   static (Client, Client) _createConnections(NodeInfo info, ClientID id) {
-    final encrypted = info.signature != null;
+    final httpClient = HttpClient()
+      ..badCertificateCallback =
+
+          // This validates certificates that aren't recognized by Root
+          // Authorities. Early DrMem instances only announced the SHA-1
+          // fingerprint, so if the MD5 signature is enpty, we simply
+          // accept that portion. Later versions use both digests and we
+          // will compare both.
+
+          (X509Certificate cert, String host, int port) =>
+              port == info.addr.port &&
+              info.signatures != null &&
+              (info.signatures!.$1 == "" ||
+                  info.signatures!.$1 == md5.convert(cert.der).toString()) &&
+              sha1.convert(cert.der).toString() == info.signatures!.$2;
+
+    final encrypted = info.signatures != null;
     final (qUri, sUri) = _buildUris(
         addr: info.addr,
         qEnd: info.queries,
@@ -376,11 +417,13 @@ class _DrMemState extends State<DrMem> {
     final Map<String, String> headers =
         encrypted ? {'X-DrMem-Client-Id': id.fingerprint} : {};
     final qClient = Client(
-        link: HttpLink(qUri.toString(), defaultHeaders: headers),
+        link: HttpLink(qUri.toString(),
+            defaultHeaders: headers, httpClient: IOClient(httpClient)),
         cache: Cache());
     final sClient = Client(
         link: WebSocketLink(null,
             channelGenerator: () => IOWebSocketChannel.connect(sUri,
+                customClient: httpClient,
                 protocols: ["graphql-ws"],
                 headers: headers,
                 connectTimeout: const Duration(seconds: 1),

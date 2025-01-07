@@ -57,11 +57,12 @@ class NodeInfo {
   /// connect.
   HostInfo addr;
 
-  /// This is a placeholder for future security. It will contain the digital
-  /// signature of the node's SSL certificate. If this field is `null`, then
-  /// the DrMem node uses an unencrypted socket. If it is not `null`, a TLS
-  /// socket should be used (i.e. https).
-  String? signature;
+  /// If a DrMem node is using an encrypted channel, it will announce two
+  /// hashs for its certificate. If this field isn't `null`, it is a pair
+  /// of signatures; the first is an MD5 hash and the second is an SHA-1 hash.
+  /// If this field is `null`, then the DrMem node uses an unencrypted socket.
+  /// If it is not `null`, a TLS socket should be used (i.e. https).
+  (String, String)? signatures;
 
   /// Indicates when the node was started. If it's `null` then the entry was
   /// programmatically entered and the actual boot time is unknown.
@@ -83,7 +84,7 @@ class NodeInfo {
       required this.version,
       required this.location,
       required this.addr,
-      this.signature,
+      this.signatures,
       this.bootTime,
       this.queries = "/drmem/q",
       this.mutations = "/drmem/q",
@@ -114,8 +115,8 @@ class NodeInfo {
 
     // If a signature is specified, save it.
 
-    if (signature != null) {
-      v['signature'] = signature!;
+    if (signatures != null) {
+      v['sig'] = {'md5': signatures!.$1, 'sha': signatures!.$2};
     }
 
     return v;
@@ -137,7 +138,16 @@ class NodeInfo {
           'mutations': String mutations,
           'subscriptions': String subscriptions
         }) {
-      final sig = json['signature'];
+      (String, String)? sig;
+
+      // Need to stay backwards compatible with configurarions that only stored
+      // one hash.
+
+      if (json case {'signature': String value}) {
+        sig = ("", value);
+      } else if (json case {'sig': {'md5': String v1, 'sha': String v2}}) {
+        sig = (v1, v2);
+      }
 
       if (sig == null || sig is String) {
         return NodeInfo(
@@ -145,7 +155,7 @@ class NodeInfo {
             version: version,
             location: location,
             addr: HostInfo(host, port),
-            signature: sig,
+            signatures: sig,
             bootTime: null,
             queries: queries,
             mutations: mutations,
@@ -169,7 +179,7 @@ class NodeInfo {
   /// replacement info has the same signature.
 
   bool canUpdate(NodeInfo o) =>
-      name == o.name && (signature == null || signature == o.signature);
+      name == o.name && (signatures == null || signatures == o.signatures);
 
   @override
   bool operator ==(Object other) =>
@@ -178,7 +188,7 @@ class NodeInfo {
       version == other.version &&
       location == other.location &&
       addr == other.addr &&
-      signature == other.signature &&
+      signatures == other.signatures &&
       bootTime == other.bootTime &&
       queries == other.queries &&
       mutations == other.mutations &&
@@ -189,5 +199,5 @@ class NodeInfo {
 
   @override
   String toString() =>
-      "{name: $name, version: $version, location: $location, addr: $addr, bootTime: $bootTime, queries: $queries, mutations: $mutations, subscriptions: $subscriptions, signature: $signature }";
+      "{name: $name, version: $version, location: $location, addr: $addr, bootTime: $bootTime, queries: $queries, mutations: $mutations, subscriptions: $subscriptions, signature: $signatures }";
 }
