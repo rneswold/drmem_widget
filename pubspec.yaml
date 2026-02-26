@@ -11,9 +11,13 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+
   nsd: ^4.0.0
+
   dart_drmem:
-    path: /Users/rich/AndroidStudioProjects/dart-drmem
+    git:
+      url: git@github.com:rneswold/dart-drmem.git
+      ref: pull-request
 
 #  built_value: ^8.9.0
 #  built_collection: ^5.1.1
