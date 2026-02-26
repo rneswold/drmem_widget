@@ -8,9 +8,9 @@ The widget uses DrMem's client API to make requests and get replies. With this
 widget, your application can:
 
 - Auto detect instances of DrMem on the local network
-- Query instances for
+- Query DrMem nodes about
   - drivers available in the instance
-  - devices available in the instance
+  - devices defined in the instance
 - Obtain device readings and historical data
 - Change the state of devices
 
@@ -24,7 +24,7 @@ Add this and the `gql_code_builder` packages to your app's dependencies:
 ```yaml
 dependencies:
   drmem_provider: ^0.1.0
-  gql_code_builder: ^0.8.0
+  gql_code_builder: ^0.13.0
 ```
 
 ## Usage
@@ -37,13 +37,6 @@ const like = 'sample';
 ```
 
 ## Additional information
-
-Before the project can be built -- and any time the GraphQL API changes -- the
-GraphQL files need to be processed. This can be done with the command:
-
-```shell
-$ dart run build_runner build --delete-conflicting-outputs
-```
 
 The author uses this widget on MacOS and Android targets. It should also work on
 Linux, IOS, and Windows, but he doesn't have systems to test them on. The mDNS

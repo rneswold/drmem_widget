@@ -6,120 +6,34 @@
 /// rebuilt, all of that state needs to be reproduced and will cause jank and
 /// extra work on the DrMem node.
 
-library drmem_widget;
+library;
 
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:http/io_client.dart';
-import 'package:web_socket_channel/io.dart';
-import 'package:gql_websocket_link/gql_websocket_link.dart';
-import 'package:gql_http_link/gql_http_link.dart';
-import 'package:ferry/ferry.dart';
 import 'package:nsd/nsd.dart';
-import 'package:crypto/crypto.dart';
-import 'package:built_collection/built_collection.dart';
-import 'schema/__generated__/set_device.data.gql.dart';
-import 'schema/__generated__/set_device.req.gql.dart';
-import 'schema/__generated__/drmem.schema.gql.dart';
-import 'schema/__generated__/driver_info.data.gql.dart';
-import 'schema/__generated__/driver_info.req.gql.dart';
-import 'schema/__generated__/get_device.data.gql.dart';
-import 'schema/__generated__/get_device.req.gql.dart';
-import 'schema/__generated__/monitor_device.req.gql.dart';
-import 'schema/__generated__/monitor_device.data.gql.dart';
-import 'schema/__generated__/monitor_device.var.gql.dart';
-
-import 'drmem_exception.dart';
-import 'client_id.dart';
-import 'device_value.dart';
-import 'device_like.dart';
-import 'device_history.dart';
-import 'node_info.dart';
-import 'reading.dart';
-import 'driver_info.dart';
-import 'device_info.dart';
+import 'package:dart_drmem/dart_drmem.dart';
 
 import 'dart:developer' as dev;
 
-typedef _NodeValue = (Client, Client);
-typedef _NodeMap = Map<String, _NodeValue>;
+typedef _NodeMap = Map<String, DrMemService>;
+
+/// Exception thrown when an operation is requested on a DrMem node that is
+/// not currently connected or registered.
+class DrMemNodeError implements Exception {
+  final String message;
+  DrMemNodeError(this.message);
+  @override
+  String toString() => "DrMemNodeError: $message";
+}
 
 // Removes a trailing period. Under OSX, a local hostname is given as
 // "name.local." so we need to remove the trailing period.
 
 String _stripTrailingPeriod(String s) =>
     s.endsWith(".") ? s.substring(0, s.length - 1) : s;
-
-// Creates a [DriverInfo] object from a GraphQL [driverInfo] reply value.
-
-DriverInfo _driverInfoFrom(GAllDriversData_driverInfo o) =>
-    DriverInfo(o.name, o.summary, o.description);
-
-// Local extension(s) to the [DevValue] type. These aren't made public because
-// they're only useful for this widget when interacting with the GraphQL API.
-
-extension on DevValue {
-  // Adds a method to the DevValue classes which can convert a value into a
-  // builder of [GSettingData]. This is used when a client wants to make a
-  // setting. Rather than create a different type (which GraphQL requires),
-  // this allows an app to use the [DevValue] hierarchy for inputs and outputs.
-
-  GSettingDataBuilder toSettingData() => switch (this) {
-        DevBool(value: bool value) => GSettingDataBuilder()..Gbool = value,
-        DevInt(value: int value) => GSettingDataBuilder()..Gint = value,
-        DevFlt(value: double value) => GSettingDataBuilder()..flt = value,
-        DevStr(value: String value) => GSettingDataBuilder()..str = value,
-        DevColor(red: int r, green: int g, blue: int b, alpha: 255) =>
-          GSettingDataBuilder()..color = ListBuilder([r, g, b]),
-        DevColor(red: int r, green: int g, blue: int b, alpha: int a) =>
-          GSettingDataBuilder()..color = ListBuilder([r, g, b, a]),
-      };
-}
-
-// Create a private extension that defines a method to convert the complex,
-// GraphQL history type into our Dart history type.
-
-extension on GGetDeviceData_deviceInfo_history {
-  // Converts the GraphQL-generated reply type (representing the device's
-  // historical summary) into a friendlier, Dart version.
-
-  DeviceHistory? toDeviceHistory() {
-    final oldest = firstPoint;
-    final newest = lastPoint;
-
-    return (oldest != null && newest != null)
-        ? DeviceHistory(
-            totalPoints: totalPoints,
-            oldest: Reading.fromParams(
-                oldest.stamp,
-                oldest.boolValue,
-                oldest.intValue,
-                oldest.floatValue,
-                oldest.stringValue,
-                oldest.colorValue?.toList()),
-            newest: Reading.fromParams(
-                newest.stamp,
-                newest.boolValue,
-                newest.intValue,
-                newest.floatValue,
-                newest.stringValue,
-                newest.colorValue?.toList()))
-        : null;
-  }
-}
-
-// Create an extension which provides a conversion method only needed by this
-// module.
-
-extension on GSetDeviceData_setDevice {
-  // Creates a [Reading] value from a GraphQL [setDevice] reply value.
-
-  Reading toReading() => Reading.fromParams(stamp, boolValue, intValue,
-      floatValue, stringValue, colorValue?.toList());
-}
 
 extension on Service {
   // Looks in the `txt` field of the Service info for a value associated with
@@ -133,10 +47,26 @@ extension on Service {
         : null;
   }
 
+  HostInfo _chooseHost(int port, String name, List<InternetAddress> ips) {
+    if (ips.isNotEmpty) {
+      return HostInfo(ips.first.address, port);
+    } else {
+      return HostInfo(_stripTrailingPeriod(name), port);
+    }
+  }
+
   NodeInfo? toNodeInfo(bool active) {
-    if (this case Service(name: String n, host: String h, port: int p)) {
-      final addr = HostInfo.tryParse(_propToString("pref-addr")) ??
-          HostInfo(_stripTrailingPeriod(h), p);
+    if (this case Service(
+      name: String n,
+      host: String h,
+      port: int p,
+      addresses: List<InternetAddress> addrs,
+    )) {
+      dev.log("node announcement: $this", name: "mDNS");
+
+      final addr =
+          HostInfo.tryParse(_propToString("pref-addr")) ??
+          _chooseHost(p, h, addrs);
       final boottime = _propToString("bootTime");
 
       (String, String)? sigs;
@@ -159,23 +89,26 @@ extension on Service {
         sigs = ("", tmp);
       }
 
-      return NodeInfo(
+      final ni = NodeInfo(
         name: n,
         addr: addr,
         location: _propToString("location") ?? "unknown",
         version: _propToString("version") ?? "0.0.0",
         bootTime: active
             ? (boottime != null
-                ? DateTime.tryParse(boottime) ?? DateTime.now()
-                : DateTime.now())
+                  ? DateTime.tryParse(boottime) ?? DateTime.now()
+                  : DateTime.now())
             : null,
         signatures: sigs,
         queries: _propToString("queries") ?? "/drmem/q",
         mutations: _propToString("mutations") ?? "/drmem/q",
         subscriptions: _propToString("subscriptions") ?? "/drmem/s",
       );
+
+      dev.log("parsed node: $ni", name: "mDNS");
+      return ni;
     } else {
-      dev.log("couldn't convert $this to NodeInfo");
+      dev.log("couldn't convert $this to NodeInfo", name: "mDNS");
       return null;
     }
   }
@@ -218,8 +151,8 @@ class DrMem extends StatefulWidget {
   ///
   /// [context] is the context of the widget making the request.
 
-  static Future<Stream<NodeInfo>> mdnsSubscribe(BuildContext context) async =>
-      _of(context)._mdnsSubscribe();
+  static Stream<NodeInfo> mdnsSubscribe(BuildContext context) =>
+      _of(context)._mdnsSubscribe;
 
   /// Adds a mapping of a node to its network connections. The `NodeInfo` type
   /// provides information on how the connections should be made.
@@ -266,14 +199,18 @@ class DrMem extends StatefulWidget {
   /// differ from the one sent.
 
   static Future<Reading> setDevice(
-          BuildContext context, Device device, DevValue value) =>
-      _of(context)._setDevice(device, value);
+    BuildContext context,
+    String node,
+    Device device,
+    DevValue value,
+  ) => _of(context)._setDevice(node, device, value);
 
   /// Retrieves driver information from a DrMem node.
   ///
   /// Each instance of DrMem interacts with it own set of hardware devices and,
   /// therefore, is built with a custom set of drivers. This function queries
-  /// the node for available information on its set of drivers.
+  /// the node for available information on its set of drivers. If the node is
+  /// not registered, this request returns `null`.
   ///
   /// [context] is the context of the widget making the request.
   ///
@@ -281,8 +218,9 @@ class DrMem extends StatefulWidget {
   /// [addNode].
 
   static Future<List<DriverInfo>> getDriverInfo(
-          BuildContext context, String node) =>
-      _of(context)._getDriverInfo(node);
+    BuildContext context,
+    String node,
+  ) => _of(context)._getDriverInfo(node);
 
   /// Returns information about a device.
   ///
@@ -298,12 +236,11 @@ class DrMem extends StatefulWidget {
   /// Returns a Future that resolves to a `List` of device information
   /// ([DevInfo]), or an error.
 
-  static Future<List<DeviceInfo>> getDeviceInfo(BuildContext context,
-          {required DeviceLike device}) =>
-      switch (device) {
-        DevicePattern() => _of(context)._getDeviceInfo(device: device),
-        Device() => _of(context)._getDeviceInfo(device: device.toPattern())
-      };
+  static Future<List<DeviceInfo>> getDeviceInfo(
+    BuildContext context, {
+    required String node,
+    required DeviceLike device,
+  }) => _of(context)._getDeviceInfo(node, device);
 
   /// Returns a stream of readings for a device.
   ///
@@ -329,10 +266,13 @@ class DrMem extends StatefulWidget {
   /// DrMem's configuration determines the size of a device's history. This
   /// function can only return what's available.
 
-  static Stream<Reading> monitorDevice(BuildContext context, Device device,
-          {DateTime? startTime, DateTime? endTime}) =>
-      _of(context)
-          ._monitorDevice(device, startTime: startTime, endTime: endTime);
+  static Stream<Reading> monitorDevice(
+    BuildContext context,
+    String node,
+    Device device, {
+    DateTime? startTime,
+    DateTime? endTime,
+  }) => _of(context)._monitorDevice(node, device, startTime, endTime);
 }
 
 class _DrMemState extends State<DrMem> {
@@ -343,7 +283,7 @@ class _DrMemState extends State<DrMem> {
   void initState() {
     super.initState();
     dev.log("starting mDNS monitor", name: "mdns.announce");
-    _disc = startDiscovery('_drmem._tcp');
+    _disc = startDiscovery('_drmem._tcp', ipLookupType: IpLookupType.v4);
   }
 
   @override
@@ -357,102 +297,32 @@ class _DrMemState extends State<DrMem> {
 
     // Close the connections to DrMem.
 
-    for (final MapEntry(value: (a, b)) in _nodes.entries) {
-      a.dispose();
-      b.dispose();
+    for (final MapEntry(value: v) in _nodes.entries) {
+      v.dispose();
     }
     super.dispose();
   }
 
-  // Helper function to create the GraphQL query URIs.
+  // Subscribes to the mDNS service to receive announcements for changes of
+  // the state of DrMem nodes on the local network.
 
-  static (Uri, Uri) _buildUris(
-          {required HostInfo addr,
-          required String qEnd,
-          required String sEnd,
-          bool encrypted = false}) =>
-      (
-        Uri(
-          scheme: encrypted ? "https" : "http",
-          host: addr.host,
-          port: addr.port,
-          path: qEnd,
-        ),
-        Uri(
-          scheme: encrypted ? "wss" : "ws",
-          host: addr.host,
-          port: addr.port,
-          path: sEnd,
-        )
-      );
+  Stream<NodeInfo> get _mdnsSubscribe {
+    // Set up a stream controller so we can announce updates about DrMem nodes.
+    // We use a broadcast stream so multiple widgets can subscribe to the same
+    // discovery stream if needed.
 
-  static String _intToHex(int v) => "0${v.toRadixString(16)}".padLeft(2, '0');
-
-  // Creates two `Client` connections that will connect to the specified node.
-  // If an encrypted channel is requested, the client's ID is passed along.
-
-  static (Client, Client) _createConnections(NodeInfo info, ClientID id) {
-    final httpClient = HttpClient()
-      ..badCertificateCallback =
-
-          // This validates certificates that aren't recognized by Root
-          // Authorities. Early DrMem instances only announced the SHA-1
-          // fingerprint, so if the MD5 signature is enpty, we simply
-          // accept that portion. Later versions use both digests and we
-          // will compare both.
-
-          (X509Certificate cert, String host, int port) =>
-              port == info.addr.port &&
-              info.signatures != null &&
-              (info.signatures!.$1 == "" ||
-                  info.signatures!.$1 == md5.convert(cert.der).toString()) &&
-              sha1.convert(cert.der).toString() == info.signatures!.$2;
-
-    final encrypted = info.signatures != null;
-    final (qUri, sUri) = _buildUris(
-        addr: info.addr,
-        qEnd: info.queries,
-        sEnd: info.subscriptions,
-        encrypted: encrypted);
-    final Map<String, String> headers =
-        encrypted ? {'X-DrMem-Client-Id': id.fingerprint} : {};
-    final qClient = Client(
-        link: HttpLink(qUri.toString(),
-            defaultHeaders: headers, httpClient: IOClient(httpClient)),
-        cache: Cache());
-    final sClient = Client(
-        link: WebSocketLink(null,
-            channelGenerator: () => IOWebSocketChannel.connect(sUri,
-                customClient: httpClient,
-                protocols: ["graphql-ws"],
-                headers: headers,
-                connectTimeout: const Duration(seconds: 1),
-                pingInterval: const Duration(seconds: 10)),
-            reconnectInterval: const Duration(seconds: 2)),
-        cache: Cache());
-
-    return (qClient, sClient);
-  }
-
-  // Validates a device value by adding a default node, if the node was null,
-  // or verifying the node exists if it isn't null.
-
-  Device _resolve(Device dev) {
-    if (_nodes.containsKey(dev.node)) {
-      return dev;
-    } else {
-      throw DrMemException("device on unknown node, '${dev.node}'");
-    }
-  }
-
-  Future<Stream<NodeInfo>> _mdnsSubscribe() async {
-    final mdns = await _disc;
     final StreamController<NodeInfo> ctrl = StreamController();
+
+    // Set up a listener to receive mDNS announcements. When an announcement is
+    // received, the listener parses the announcement and adds it to the stream
+    // if it is valid.
 
     void serviceListener(Service service, ServiceStatus status) {
       if (service.name == null) {
-        dev.log("mDNS announcement is missing service name ... ignoring",
-            name: "mDNS");
+        dev.log(
+          "mDNS announcement is missing service name ... ignoring",
+          name: "mDNS",
+        );
         return;
       }
 
@@ -464,15 +334,23 @@ class _DrMemState extends State<DrMem> {
       }
     }
 
-    ctrl.onResume = ctrl.onListen = () {
+    // Define handlers that start and stop listening to the mDNS service
+    // during application lifecycle events.
+
+    ctrl.onResume = ctrl.onListen = () async {
+      final mdns = await _disc;
       mdns.addServiceListener(serviceListener);
       dev.log("listening to mdns stream", name: "mDNS");
     };
 
-    ctrl.onPause = ctrl.onCancel = () {
+    ctrl.onPause = ctrl.onCancel = () async {
+      final mdns = await _disc;
       mdns.removeServiceListener(serviceListener);
       dev.log("ignoring mdns stream", name: "mDNS");
     };
+
+    // Return the stream of node announcements.
+
     return ctrl.stream;
   }
 
@@ -480,7 +358,12 @@ class _DrMemState extends State<DrMem> {
 
   void _addNode(NodeInfo info, ClientID clientId) {
     if (!_nodes.containsKey(info.name)) {
-      _nodes[info.name] = _createConnections(info, clientId);
+      _nodes[info.name] = DrMemService(info: info, clientId: clientId);
+    } else {
+      dev.log(
+        "attempted to add node ${info.name} but it already exists ... ignoring",
+        name: "DrMem",
+      );
     }
   }
 
@@ -488,123 +371,38 @@ class _DrMemState extends State<DrMem> {
 
   void _removeNode(String name) => _nodes.remove(name);
 
-  // Translates the response of a [getDeviceInfo] query into a `List<DevInfo>`.
+  // Helper to retrieve a node or throw if missing.
 
-  List<DeviceInfo> Function(GGetDeviceData) _toDevInfoList(String node) =>
-      (result) => result.deviceInfo
-          .map((e) => DeviceInfo(
-                Device(name: e.deviceName, node: node),
-                e.settable,
-                e.units,
-                e.history.toDeviceHistory(),
-              ))
-          .toList()
-        ..sort((DeviceInfo a, DeviceInfo b) => a.device.compareTo(b.device));
+  DrMemService _getNodeOrThrow(String node) =>
+      _nodes[node] ??
+      (throw DrMemNodeError("DrMem node '$node' is not connected."));
 
-  // Gets the two GraphQL handles associated with the specified node.
+  Future<Reading> _setDevice(
+    String node,
+    Device device,
+    DevValue value,
+  ) async => _getNodeOrThrow(node).setDevice(device, value);
 
-  (Client, Client) _getHandles(String node) {
-    if (_nodes[node] case (Client q, Client s)) {
-      return (q, s);
-    } else {
-      throw ArgumentError("node '$node' not found");
-    }
-  }
+  Future<List<DriverInfo>> _getDriverInfo(String node) async =>
+      _getNodeOrThrow(node).getDriverInfo();
 
-  // This internal function generalizes a GraphQL "RPC" call. In the `ferry`
-  // GraphQL package, all GraphQL interactions return a stream -- even RPCs.
-  // The incoming packets indicate the states the request goes through. This
-  // function finds the packet that has the return value and passes it to a
-  // translation function to get the final value.
+  Future<List<DeviceInfo>> _getDeviceInfo(
+    String node,
+    DeviceLike device,
+  ) async => switch (device) {
+    DevicePattern() => _getNodeOrThrow(node).getDeviceInfo(device: device),
+    Device() => _getNodeOrThrow(node).getDeviceInfo(device: device.toPattern()),
+  };
 
-  Future<Result> _rpc<TData, TVars, Result>(String node,
-      OperationRequest<TData, TVars> request, Result Function(TData) xlat) {
-    Result processResponse(OperationResponse<TData, TVars> value) {
-      if (value.hasErrors) {
-        throw DrMemException(
-            value.graphqlErrors?.join('\n') ?? "No description for error.");
-      } else {
-        final data = value.data;
-
-        if (data != null) {
-          return xlat(data);
-        } else {
-          throw const DrMemException("No data was returned from request.");
-        }
-      }
-    }
-
-    final (Client query, _) = _getHandles(node);
-
-    return query
-        .request(request)
-        .where((response) => !response.loading)
-        .first
-        .then(processResponse);
-  }
-
-  // The implementation of [DrMem.setDevice].
-
-  Future<Reading> _setDevice(Device device, DevValue value) => _rpc(
-      _resolve(device).node,
-      GSetDeviceReq((b) => b
-        ..vars.device = device.name
-        ..vars.value = value.toSettingData()),
-      (result) => result.setDevice.toReading());
-
-  // The implementation of [DrMem.getDriverInfo].
-
-  Future<List<DriverInfo>> _getDriverInfo(String node) => _rpc(
-        node,
-        GAllDriversReq((b) => b),
-        (result) => result.driverInfo.map(_driverInfoFrom).toList()
-          ..sort((DriverInfo a, DriverInfo b) => a.name.compareTo(b.name)),
-      );
-
-  // This is the implementation of [DrMem.getDeviceInfo].
-
-  Future<List<DeviceInfo>> _getDeviceInfo({required DevicePattern device}) =>
-      _rpc(
-          device.node,
-          GGetDeviceReq((b) => b
-            ..fetchPolicy = FetchPolicy.NetworkOnly
-            ..vars.name = device.name),
-          _toDevInfoList(device.node));
-
-  // Returns an appropriate GDateRangeBuilder based on the two input dates.
-  // In DrMem's GraphQL API, if both dates are `null`, we don't provide a
-  // date range (i.e. `null`). Otherwise we return a builder (possibly with
-  // one of the date fields `null`.)
-
-  GDateRangeBuilder? _buildDateRange(DateTime? a, DateTime? b) =>
-      (a != null || b != null)
-          ? (GDateRangeBuilder()
-            ..start = a
-            ..end = b)
-          : null;
-
-  static Reading _monDevRespToReading(
-      OperationResponse<GMonitorDeviceData, GMonitorDeviceVars> response) {
-    final data = response.data!.monitorDevice;
-
-    return Reading.fromParams(data.stamp, data.boolValue, data.intValue,
-        data.floatValue, data.stringValue, data.colorValue?.toList());
-  }
-
-  // The implementation of [DrMem.monitorDevice].
-
-  Stream<Reading> _monitorDevice(Device device,
-      {DateTime? startTime, DateTime? endTime}) {
-    final dev = _resolve(device);
-    final (_, Client sub) = _getHandles(dev.node);
-
-    return sub
-        .request(GMonitorDeviceReq((b) => b
-          ..fetchPolicy = FetchPolicy.NetworkOnly
-          ..vars.device = device.name
-          ..vars.range = _buildDateRange(startTime, endTime)))
-        .where((response) => !response.loading && response.data != null)
-        .map(_monDevRespToReading);
+  Stream<Reading> _monitorDevice(
+    String node,
+    Device device,
+    DateTime? startTime,
+    DateTime? endTime,
+  ) async* {
+    yield* _getNodeOrThrow(
+      node,
+    ).monitorDevice(device, startTime: startTime, endTime: endTime);
   }
 
   @override
