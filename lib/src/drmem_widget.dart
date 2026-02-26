@@ -178,6 +178,13 @@ class DrMem extends StatefulWidget {
   static void removeNode(BuildContext context, String name) =>
       _of(context)._removeNode(name);
 
+  /// Returns a sorted list of known node names.
+  ///
+  /// [context] is the context of the widget making the request.
+
+  static List<String> getNodes(BuildContext context) =>
+      _of(context)._getNodes();
+
   /// Sets a value of a DrMem device.
   ///
   /// The target device must be settable.
@@ -370,6 +377,8 @@ class _DrMemState extends State<DrMem> {
   // The implementation of [DrMem.removeNode].
 
   void _removeNode(String name) => _nodes.remove(name);
+
+  List<String> _getNodes() => _nodes.keys.toList()..sort();
 
   // Helper to retrieve a node or throw if missing.
 
