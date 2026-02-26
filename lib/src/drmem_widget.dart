@@ -35,6 +35,31 @@ class DrMemNodeError implements Exception {
 String _stripTrailingPeriod(String s) =>
     s.endsWith(".") ? s.substring(0, s.length - 1) : s;
 
+enum _DrMemAspect { nodeList }
+
+class _DrMemProvider extends InheritedModel<_DrMemAspect> {
+  final _DrMemState state;
+  final Set<String> nodeNames;
+
+  const _DrMemProvider({
+    required this.state,
+    required this.nodeNames,
+    required super.child,
+  });
+
+  @override
+  bool updateShouldNotify(_DrMemProvider oldWidget) =>
+      !setEquals(nodeNames, oldWidget.nodeNames);
+
+  @override
+  bool updateShouldNotifyDependent(
+    _DrMemProvider oldWidget,
+    Set<_DrMemAspect> dependencies,
+  ) =>
+      dependencies.contains(_DrMemAspect.nodeList) &&
+      !setEquals(nodeNames, oldWidget.nodeNames);
+}
+
 extension on Service {
   // Looks in the `txt` field of the Service info for a value associated with
   // the requested key. If found, it returns the value as a String.
@@ -138,10 +163,19 @@ class DrMem extends StatefulWidget {
   @override
   State<DrMem> createState() => _DrMemState();
 
-  /// Returns the instance of this class higher up in the widget tree.
+  // Returns the instance of this class higher up in the widget tree.
+  //
+  // If [aspect] is provided, the calling widget will be registered to be
+  // rebuilt when the node list changes.
 
-  static _DrMemState _of(BuildContext context) =>
-      context.findAncestorStateOfType<_DrMemState>()!;
+  static _DrMemState _of(BuildContext context, {_DrMemAspect? aspect}) =>
+      (aspect == null
+              ? context.getInheritedWidgetOfExactType<_DrMemProvider>()
+              : InheritedModel.inheritFrom<_DrMemProvider>(
+                  context,
+                  aspect: aspect,
+                ))!
+          .state;
 
   /// Returns a future that resolves to a stream that returns NodeInfo objects
   /// for DrMem nodes that are announcing themselves on the local network. The
@@ -183,7 +217,7 @@ class DrMem extends StatefulWidget {
   /// [context] is the context of the widget making the request.
 
   static List<String> getNodes(BuildContext context) =>
-      _of(context)._getNodes();
+      _of(context, aspect: _DrMemAspect.nodeList)._getNodes();
 
   /// Sets a value of a DrMem device.
   ///
@@ -365,7 +399,9 @@ class _DrMemState extends State<DrMem> {
 
   void _addNode(NodeInfo info, ClientID clientId) {
     if (!_nodes.containsKey(info.name)) {
-      _nodes[info.name] = DrMemService(info: info, clientId: clientId);
+      setState(() {
+        _nodes[info.name] = DrMemService(info: info, clientId: clientId);
+      });
     } else {
       dev.log(
         "attempted to add node ${info.name} but it already exists ... ignoring",
@@ -376,7 +412,7 @@ class _DrMemState extends State<DrMem> {
 
   // The implementation of [DrMem.removeNode].
 
-  void _removeNode(String name) => _nodes.remove(name);
+  void _removeNode(String name) => setState(() => _nodes.remove(name));
 
   List<String> _getNodes() => _nodes.keys.toList()..sort();
 
@@ -415,5 +451,9 @@ class _DrMemState extends State<DrMem> {
   }
 
   @override
-  Widget build(BuildContext context) => widget.child;
+  Widget build(BuildContext context) => _DrMemProvider(
+    state: this,
+    nodeNames: _nodes.keys.toSet(),
+    child: widget.child,
+  );
 }
