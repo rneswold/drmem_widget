@@ -16,11 +16,8 @@ dependencies:
 
   dart_drmem:
     git:
-      url: git@github.com:rneswold/dart-drmem.git
-      ref: pull-request
-
-#  built_value: ^8.9.0
-#  built_collection: ^5.1.1
+      url: git@github.com:DrMemCS/dart-drmem.git
+      ref: main
 
 dev_dependencies:
   flutter_test:
